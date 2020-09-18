@@ -1,4 +1,4 @@
-# KEP-NNNN: Pass resource requests and limits to CRI
+# KEP-NNNN: Pass Container Resource Requests and Limits to CRI via Annotations
 
 <!-- toc -->
 - [Release Signoff Checklist](#release-signoff-checklist)
@@ -7,23 +7,26 @@
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
-  - [User Stories (Optional)](#user-stories-optional)
+  - [User Stories](#user-stories)
     - [Story 1](#story-1)
     - [Story 2](#story-2)
-  - [Notes/Constraints/Caveats (Optional)](#notesconstraintscaveats-optional)
-  - [Risks and Mitigations](#risks-and-mitigations)
+    - [Story 3](#story-3)
+  - [Container Resources via Annotations](#container-resources-via-annotations)
+  - [Notes](#notes)
 - [Design Details](#design-details)
   - [Test Plan](#test-plan)
   - [Graduation Criteria](#graduation-criteria)
   - [Upgrade / Downgrade Strategy](#upgrade--downgrade-strategy)
   - [Version Skew Strategy](#version-skew-strategy)
 - [Production Readiness Review Questionnaire](#production-readiness-review-questionnaire)
+<!--
   - [Feature Enablement and Rollback](#feature-enablement-and-rollback)
   - [Rollout, Upgrade and Rollback Planning](#rollout-upgrade-and-rollback-planning)
   - [Monitoring Requirements](#monitoring-requirements)
   - [Dependencies](#dependencies)
   - [Scalability](#scalability)
   - [Troubleshooting](#troubleshooting)
+-->
 - [Implementation History](#implementation-history)
 - [Drawbacks](#drawbacks)
 - [Alternatives](#alternatives)
@@ -52,46 +55,81 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 
 ## Summary
 
-Currently kubelet does not provide complete information on container
-`resources` specifications (`requires` and `limits`) to CRI. This
-information would help topology aware CRIs to optimize physical
-resource allocation in the system. Optimal allocations result in
-significant performance improvements by minimizing unnecessary data
-transfers between memory controllers connecting NUMA nodes, CPU
-dies/sockets, various memory types and accelerator hardware. This KEP
-proposes disclosing resource specifications.
+kubelet does not provide complete information about the container
+`resources` specification (`requires` and `limits`) to CRI. However,
+many use-cases can be identified where detailed knowledge of all the
+resources can be utilized for better resource allocation or fine grained
+pod sandbox configuration.
+
+This KEP proposes disclosing container `resources` information to
+container runtimes without CRI API changes via annotations.
 
 ## Motivation
 
-Currently kubelet is responsible on selecting CPUs and memories to be
-allocated for a container by sending `UpdateContainerResources`
-request to a CRI. However, making optimal allocations on CPU threads,
-memory nodes and other resources would require understanding topology
-and performance characteristics of the underlying system. Allocator
-would need to know how the resources are connected to each other.
+Currently, kubelet is (only) responsible for selecting CPUs and memories to be
+allocated for a container by sending `UpdateContainerResources` request to CRI.
+Non-native resources such as extended resources and the device plugin resources
+are not visible container runtimes.
 
-The purpose of this KEP is to enable optimizing resource allocation
-decisions outside `kubelet`: for instance in platform-optimized CRIs
-or CRI proxies such as [CRI Resource
-Manager](https://github.com/intel/cri-resource-manager).
+However, making optimal allocations of CPU threads,
+memory nodes and other resources would require understanding of the topology
+and performance characteristics of the underlying system and also how the
+resources are connected to each other. Optimal allocations result in
+significant performance improvements by minimizing unnecessary data
+transfers between memory controllers connecting NUMA nodes, CPU
+dies/sockets, various memory types and accelerator hardware.
+
+With the
+changes proposed by this KEP, platform-optimized container runtimes or CRI proxies such
+as [CRI Resource Manager](https://github.com/intel/cri-resource-manager) can get
+detailed information from `kubelet` about the containers' resource request.
 
 ### Goals
 
-This KEP is an enabler that aims to make `kubelet` more transparent so
-that lower layers in software stack are get information on pod
-resources.
+This KEP is an enabler to make kubelet more transparent to
+lower layers in software stack about the container resources.
 
-As a consequence, this KEP eases the pressure to make `kubelet`
+As a consequence, this KEP eases the pressure to make kubelet's
 internal resource allocation aware of plethora of existing platform
 topologies.
 
 ### Non-Goals
 
-This KEP does not optimize resource allocation.
+This KEP does not aim to change/optimize `kubelet` resource allocation.
 
 ## Proposal
 
-`kubelet` discloses pod `resources` information to CRIs via
+### User Stories
+
+<!--
+Detail the things that people will be able to do if this KEP is implemented.
+Include as much detail as possible so that people can understand the "how" of
+the system. The goal here is to make this feel real for users without getting
+bogged down.
+-->
+
+#### Story 1
+
+As a cluster administrator, I want to install an OCI hook/runc wrapper that
+handles custom container resource control using the information from the
+container resource requests.
+
+#### Story 2
+
+As a container runtime developer, I want to be able to build resource constrained
+pod sandbox configuration based on the resource requirements specified by containers
+within the pod. Example: Kata containers shim can set up virtualized Intel SGX EPC
+memory sections dynamically based on the resource requests specified by containers.
+
+#### Story 3
+
+As a CRI runtime developer, I want to know detailed container resource requests
+of all resources handled by kubelet to be able to make optimal, platform specific,
+resource allocations.
+
+### Container Resources via Annotations
+
+`kubelet` discloses container `resources` information to CRIs via
 annotations in `CreateContainer` request configuration.
 
 Example: Pod specification:
@@ -126,11 +164,11 @@ Results in CreateContainer request with annotations:
 "io.kubernetes.container.resources.requests.xyz.com/xyz-hw": "25"
 ```
 
-When CRI layer gets this information, it can make sure that requested
+When the CRI layer gets this information, it can make sure that the requested
 CPU, memory and `xyz-hw` resources are reserved to the container so
 that accesses are as efficient as possible.
 
-### Considerations on using annotations
+### Notes
 
 * Annotating requests/limits does not change APIs.
 
@@ -143,12 +181,14 @@ that accesses are as efficient as possible.
   through layers that do not understand them, down to the layer that
   uses them.
 
-* **Downward API** enables passing resource requests/limit down to
+* **Downward API** enables passing resource requests/limits down to
   container files and environment variables. However, this works only
   for explicitly supported resources like CPU and memory (for more
-  information, see `resourceFieldRef`), but does not work for extended
-  resources. Including requests/limits to annotations would enable
-  Downward API to work with extended resources, too.
+  information, see `resourceFieldRef`), but does not work for all
+  resources, such as extended resources or HugePages. With the idea in
+  this KEP, there could be an opportunity to harmonize the way both
+  container runtimes and the containers themselves get to know about
+  all the resources granted.
 
 * **Webhooks** can modify Pod specifications, so it might be tempting
   to outsource annotating to webhooks. Unfortunately that would not
@@ -159,56 +199,17 @@ that accesses are as efficient as possible.
   this annotation would have to be guaranteed to run after all
   webhooks that can modify requests/limits.
 
-### Reference implementation
-
-
-
-### User Stories (Optional)
-
-
-
-<!--
-Detail the things that people will be able to do if this KEP is implemented.
-Include as much detail as possible so that people can understand the "how" of
-the system. The goal here is to make this feel real for users without getting
-bogged down.
--->
-
-#### Story 1
-
-#### Story 2
-
-### Notes/Constraints/Caveats (Optional)
-
-<!--
-What are the caveats to the proposal?
-What are some important details that didn't come across above?
-Go in to as much detail as necessary here.
-This might be a good place to talk about core concepts and how they relate.
--->
-
-### Risks and Mitigations
-
-<!--
-What are the risks of this proposal, and how do we mitigate? Think broadly.
-For example, consider both security and how this will impact the larger
-Kubernetes ecosystem.
-
-How will security be reviewed, and by whom?
-
-How will UX be reviewed, and by whom?
-
-Consider including folks who also work outside the SIG or subproject.
--->
-
 ## Design Details
 
-Reference implementation that changes `kubelet` to add requests/limit
+A reference implementation that changes `kubelet` to add requests/limit
 of native and extended resources to container annotations:
 
 https://github.com/askervin/kubernetes/tree/57j_resource_annotations
 
 ### Test Plan
+
+* Kubernetes E2E tests are updated to check that the requested container
+  resources are correctly mapped to annotations seen by CRI.
 
 <!--
 **Note:** *Not required until targeted at a release.*
@@ -229,6 +230,8 @@ when drafting this test plan.
 -->
 
 ### Graduation Criteria
+
+* **N/A**
 
 <!--
 **Note:** *Not required until targeted at a release.*
@@ -340,6 +343,7 @@ you need any help or guidance.
 
 -->
 
+<!--
 ### Feature Enablement and Rollback
 
 _This section must be completed when targeting alpha to a release._
@@ -521,6 +525,7 @@ _This section must be completed when targeting beta graduation to a release._
 [supported limits]: https://git.k8s.io/community//sig-scalability/configs-and-limits/thresholds.md
 [existing SLIs/SLOs]: https://git.k8s.io/community/sig-scalability/slos/slos.md#kubernetes-slisslos
 
+-->
 ## Implementation History
 
 <!--
